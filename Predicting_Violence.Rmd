@@ -1,0 +1,362 @@
+---
+title: "Predicting The Scale of Deadly Political Violence In Sub-Saharan Africa And The Maghreb"
+author: "Jasper Linke"
+date: "June 15, 2019"
+output: pdf_document
+---
+
+#Introduction
+
+This project uses a least square error machine leaning algorithm to predict the level of deadly political violence in Sub-Saharan Africa and the Maghreb between January 1997 and June 2019. The data used for this exercise is the African event data set of the Armed Conflict Location and Event Data Project (ACLED) published by the Peace Research Institute Oslo in June 2019. The data set was retrieved from the ACLED website on June 15 and can be found in this Git hub repository: https://github.com/jprlink/edx.git
+
+This brief report will inform about the main steps undertaken in the project: 1) data cleaning and filtering, 2) data exploration, 3) preparation of train and test tests, 4) model training and selection, 5) regularization, 6) test of best-performing model, and 7) discussion of findings.
+
+#Methods and analysis
+
+The following packages were loaded for the project:
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(caret)
+library(readxl)
+library(lubridate)
+```
+
+The African event data set is imported as Excel file to the project and converted into a data frame to facilitate further analysis.
+
+```{r data retrival, echo=FALSE}
+events_all <- read_xlsx("data/Africa_1997-2019_Jun08.xlsx")
+events_all <- as.data.frame(events_all)
+str(events_all)
+```
+
+The data frame currently entails 27 variables and both violent and non-violent events. We therefore create a new data set "events" that only entails deadly events and is limited to key variables we are interested in: The the perpetrator of violence, the target of violence, the first administrative unit where the event was observed (usually the state level), and finally the day of the event. 
+
+As political decision-makers might rather ask analysts to determine the likely magnitude of deadly events than the precise number of deaths, a new ordinal variable "DEATHS" is created based on four categories of fatality rates: 1-4, 5-9, 10-24 and 25+ deaths caused by a particular event.
+
+As second variable "WEEK" is constructed by rounding the event dates to their week. This takes into account the fact that many days only see one deadly event happening.
+
+
+```{r data filtering and variable selection, echo=FALSE}
+events <- events_all %>%  filter(!is.na(EVENT_ID_CNTY) & !is.na(ACTOR1) & !is.na(ACTOR2) & !is.na(ADMIN1) & !is.na(EVENT_DATE), FATALITIES >= 1)
+events <- events %>% mutate(DEATHS = cut(FATALITIES, breaks=c(1, 4, 9, 24, Inf), labels=c("1-4", "5-9", "10-24", "25+"), include.lowest = T), WEEK = round_date(EVENT_DATE, "week"))
+events <- events %>% select(FATALITIES, DEATHS, ACTOR1, ACTOR2, ADMIN1, WEEK)
+summary(events$DEATHS)
+```
+
+As it could be expected, deadly events tend to fall into the lowest category of death rates, and the frequency becomes much lower towards the categories of more extreme death rates. However, there is still significant variability across the categories.
+
+To facilitate further analysis, the explanatory variables are converted into factors and the death rate variable into an integer with values 1-4.
+
+
+```{r conversion of variables, echo=FALSE}
+events$DEATHS <- as.integer(events$DEATHS)
+events$ADMIN1 <- as.factor(events$ADMIN1)
+events$ACTOR1 <- as.factor(events$ACTOR1)
+events$ACTOR2 <- as.factor(events$ACTOR2)
+events$WEEK <- as.factor(events$WEEK)
+```
+
+90 percent of the event data set are allocated to a training and 10 percent to a test test. By using repeatedly the semi-joint function, it is ensured that all levels of the key variables feature both in the test and the train set.
+
+
+```{r preparation of train and test test, echo=FALSE }
+set.seed(1)
+test_index <- createDataPartition(y = events$DEATHS, times = 1, p = 0.1, list = FALSE)
+train_set <- events[-test_index,]
+test_set <- events[test_index,]
+
+train_set <- train_set %>% 
+  semi_join(test_set, by = "DEATHS") %>%
+  semi_join(test_set, by = "ACTOR1") %>%
+  semi_join(test_set, by = "ACTOR2") %>%
+  semi_join(test_set, by = "WEEK") %>%
+  semi_join(test_set, by = "ADMIN1")
+
+test_set <- test_set %>% 
+  semi_join(train_set, by = "DEATHS") %>%
+  semi_join(train_set, by = "ACTOR1") %>%
+  semi_join(train_set, by = "ACTOR2") %>%
+  semi_join(train_set, by = "WEEK") %>%
+  semi_join(train_set, by = "ADMIN1")
+
+train_set <- train_set %>% 
+  semi_join(test_set, by = "DEATHS") %>%
+  semi_join(test_set, by = "ACTOR1") %>%
+  semi_join(test_set, by = "ACTOR2") %>%
+  semi_join(test_set, by = "WEEK") %>%
+  semi_join(test_set, by = "ADMIN1")
+
+test_set <- test_set %>% 
+  semi_join(train_set, by = "DEATHS") %>%
+  semi_join(train_set, by = "ACTOR1") %>%
+  semi_join(train_set, by = "ACTOR2") %>%
+  semi_join(train_set, by = "WEEK") %>%
+  semi_join(train_set, by = "ADMIN1")
+```
+
+Based on the training set, several models are evaluated with regard to their predictive power, measured through the root-mean-square error (RMSE). 
+
+A first "naive" model predicts the death rate only based on the mean death rate of deadly events. The model results in an RMSE of 0.9360634.
+
+```{r first model, echo=FALSE}
+mu_hat <- mean(train_set$DEATHS)
+
+naive_rmse <- RMSE(train_set$DEATHS, mu_hat)
+
+rmse_results <- tibble(method = "Just the average", RMSE = naive_rmse)
+```
+
+A second model is based on the location (the first administrative unit) where deadly events occur. It would be plausible that areas with certain political, social, economic and environmental characteristics are more prone to a certain level of deadly violence than others. As indicated by the lower RMSE, adding a location effect b_l outperforms the "naive" model significantly. The histogram shows that knowing the location tends to shift the prediction somewhere between 0 and -0.5 death rates from the mean (1.5).
+
+```{r second model, echo=FALSE}
+mu <- mean(train_set$DEATHS)
+loc_avgs <- train_set %>%
+  group_by(ADMIN1) %>%
+  summarize(b_l = mean(DEATHS - mu))
+
+loc_avgs %>% qplot(b_l, geom ="histogram", bins = 20, data = ., color = I("black"))
+
+predicted_fatalities <- mu + train_set %>%
+  left_join(loc_avgs, by='ADMIN1') %>%
+  pull(b_l)
+
+model_1_rmse <- RMSE(predicted_fatalities, train_set$DEATHS)
+rmse_results <- bind_rows(rmse_results,
+                           tibble(method="Location Effect Model",
+                                      RMSE = model_1_rmse))
+rmse_results %>% knitr::kable()
+```
+
+A third model is based on the assumption that knowing the armed actor perpetrating an attack can further improve the prediction of the magnitude of fatalities. As seen in the histogram, the predictions show some variation around the predictions of the previous model (indicated by the 0). However, the effect of knowing the perpetrator further improves the prediction, as indicated by the lower RMSE. 
+
+```{r third model, echo=FALSE}
+perp_avgs <- train_set %>%
+  left_join(loc_avgs, by='ADMIN1') %>%
+  group_by(ACTOR1) %>%
+  summarize(b_p = mean(DEATHS - mu - b_l))
+
+perp_avgs %>% qplot(b_p, geom ="histogram", bins = 20, data = ., color = I("black"))
+
+predicted_fatalities <- train_set %>%
+  left_join(loc_avgs, by='ADMIN1') %>%
+  left_join(perp_avgs, by='ACTOR1') %>%
+  mutate(pred = mu + b_l + b_p) %>%
+  pull(pred)
+
+model_2_rmse <- RMSE(predicted_fatalities, train_set$DEATHS)
+rmse_results <- bind_rows(rmse_results,
+                           tibble(method="Location + Perpetrator Effects Model",
+                                      RMSE = model_2_rmse))
+rmse_results %>% knitr::kable()
+```
+
+A fourth model is constructed to include an effect b_t, based on knowing the potential targets of the deadly violence. The assumption is that some groups of people more often suffer from higher or lower levels of deadly violence that others. As seen in the histogram, the predictions show low variation and are close to those of the previous model. However, adding the target effect further improves the prediction, as indicated by the lower RMSE.
+
+```{r fourth model, echo=FALSE}
+targ_avgs <- train_set %>%
+  left_join(loc_avgs, by='ADMIN1') %>%
+  left_join(perp_avgs, by='ACTOR1') %>%
+  group_by(ACTOR2) %>%
+  summarize(b_t = mean(DEATHS - mu - b_l - b_p))
+
+targ_avgs %>% qplot(b_t, geom ="histogram", bins = 20, data = ., color = I("black"))
+
+predicted_fatalities <- train_set %>%
+  left_join(loc_avgs, by='ADMIN1') %>%
+  left_join(perp_avgs, by='ACTOR1') %>%
+  left_join(targ_avgs, by='ACTOR2') %>%
+  mutate(pred = mu + b_l + b_p + b_t) %>%
+  pull(pred)
+
+model_3_rmse <- RMSE(predicted_fatalities, train_set$DEATHS)
+rmse_results <- bind_rows(rmse_results,
+                           tibble(method="Location + Perpetrator + Target Effects Model",
+                                      RMSE = model_3_rmse))
+rmse_results %>% knitr::kable()
+```
+
+A fifth model is constructed by adding a time effect, based on the week of an event, to the previous model. The assumption is that the level of violence might vary over time. Adding a time effect significantly improves the predictive power compared to the previous model, as indicated by the lower RMSE. 
+
+```{r fifth model, echo=FALSE}
+date_avgs <- train_set %>%
+  left_join(loc_avgs, by='ADMIN1') %>%
+  left_join(perp_avgs, by='ACTOR1') %>%
+  left_join(targ_avgs, by='ACTOR2') %>%
+  group_by(WEEK) %>%
+  summarize(b_d = mean(DEATHS - mu - b_l - b_p - b_t))
+
+date_avgs %>% qplot(b_d, geom ="histogram", bins = 20, data = ., color = I("black"))
+
+predicted_fatalities <- train_set %>%
+  left_join(loc_avgs, by='ADMIN1') %>%
+  left_join(perp_avgs, by='ACTOR1') %>%
+  left_join(targ_avgs, by='ACTOR2') %>%
+  left_join(date_avgs, by='WEEK') %>%
+  mutate(pred = mu + b_l + b_p + b_t + b_d) %>%
+  pull(pred)
+
+model_4_rmse <- RMSE(predicted_fatalities, train_set$DEATHS)
+rmse_results <- bind_rows(rmse_results,
+                           tibble(method="Location + Perpetrator + Target + Event Date Effects Model",
+                                      RMSE = model_4_rmse))
+rmse_results %>% knitr::kable()
+```
+
+How can we further improve the predictive power of our model? We can observe that the number of events per location, perpetrator, target and week tends to be very low and some locations, perpetrators, targets and weeks with high mean death rates only saw one or two events. 
+
+```{r analysis, echo=FALSE}
+train_set %>%
+  group_by(ADMIN1) %>%
+  summarize(events = n(), rate = mean(DEATHS)) %>%
+  arrange(desc(rate)) %>% 
+  head() %>% 
+  knitr::kable()
+
+train_set %>%
+  group_by(ADMIN1) %>%
+  summarize(events = n(), rate = mean(DEATHS)) %>%
+  ggplot(aes(events, rate)) +
+  geom_point() +
+  labs(y = "mean death rate per location" , x = "number of events per location")
+
+train_set %>%
+  group_by(ACTOR1) %>%
+  summarize(events = n(), rate = mean(DEATHS)) %>%
+  arrange(desc(rate)) %>% 
+  head() %>% 
+  knitr::kable()
+
+train_set %>%
+  group_by(ACTOR1) %>%
+  summarize(events = n(), rate = mean(DEATHS)) %>%
+  ggplot(aes(events, rate)) +
+  geom_point() +
+  labs(y = "mean death rate per perpetrator" , x = "number of events per perpetrator")
+
+train_set %>%
+  group_by(ACTOR2) %>%
+  summarize(events = n(), rate = mean(DEATHS)) %>%
+  arrange(desc(rate)) %>% 
+  head() %>% 
+  knitr::kable()
+
+train_set %>%
+  group_by(ACTOR2) %>%
+  summarize(events = n(), rate = mean(DEATHS)) %>%
+  ggplot(aes(events, rate)) +
+  geom_point() +
+  labs(y = "mean death rate per target" , x = "number of events per target")
+
+train_set %>%
+  group_by(WEEK) %>%
+  summarize(events = n(), rate = mean(DEATHS)) %>%
+  arrange(desc(rate)) %>% 
+  head() %>% 
+  knitr::kable()
+
+train_set %>%
+  group_by(WEEK) %>%
+  summarize(events = n(), rate = mean(DEATHS)) %>%
+  ggplot(aes(events, rate)) +
+  geom_point() +
+  labs(y = "mean death rate per week" , x = "number of events per week")
+```
+
+To control for this variation effect, regularization techniques are applied to the previous model. Penalized regression may control for the total variability of the frequency of events across locations, perpetrators, targets and weeks. The penalty term lambda is a tuning parameter and we will choose it through cross-validation. As we see below, regularization slightly further decreases the RMSE of the previous model by adding Lambda = 0.5. 
+
+```{r regularization, echo=FALSE}
+lambdas <- seq(0, 10, 0.25)
+rmses <- sapply(lambdas, function(l){
+  mu <- mean(train_set$DEATHS)
+  b_l <- train_set %>%
+    group_by(ADMIN1) %>%
+    summarize(b_l = sum(DEATHS - mu)/(n()+l))
+  b_p <- train_set %>%
+    left_join(b_l, by="ADMIN1") %>%
+    group_by(ACTOR1) %>%
+    summarize(b_p = sum(DEATHS - b_l - mu)/(n()+l))
+  b_t <- train_set %>%
+    left_join(b_l, by="ADMIN1") %>%
+    left_join(b_p, by="ACTOR1") %>%
+    group_by(ACTOR2) %>%
+    summarize(b_t = sum(DEATHS - b_l - b_p - mu)/(n()+l))
+  b_d <- train_set %>%
+    left_join(b_l, by="ADMIN1") %>%
+    left_join(b_p, by="ACTOR1") %>%
+    left_join(b_t, by="ACTOR2") %>%
+    group_by(WEEK) %>%
+    summarize(b_d = sum(DEATHS - b_l - b_p - b_t - mu)/(n()+l))
+  predicted_fatalities <-
+    train_set %>%
+    left_join(b_l, by = "ADMIN1") %>%
+    left_join(b_p, by = "ACTOR1") %>%
+    left_join(b_t, by = "ACTOR2") %>%
+    left_join(b_d, by = "WEEK") %>%
+    mutate(pred = mu + b_l + b_p + b_t + b_d) %>%
+    pull(pred)
+  return(RMSE(predicted_fatalities, train_set$DEATHS))
+})
+
+qplot(lambdas, rmses)
+
+lambda <- lambdas[which.min(rmses)]
+rmse_results <- bind_rows(rmse_results,
+                           tibble(method="Regularized Location + Perpetrator + Target + Date Effect Model",
+                                      RMSE = min(rmses)))
+rmse_results %>% knitr::kable()
+```
+
+The best-performing model is now applied to the test set. It turns out that the algorithm predicts the level of deadly violence even better for the test set than for the training set.
+
+```{r test, echo=FALSE}
+mu <- mean(test_set$DEATHS)
+
+b_l <- test_set %>%
+    group_by(ADMIN1) %>%
+    summarize(b_l = sum(DEATHS - mu)/(n()+lambda))
+b_p <- test_set %>%
+    left_join(b_l, by="ADMIN1") %>%
+    group_by(ACTOR1) %>%
+    summarize(b_p = sum(DEATHS - b_l - mu)/(n()+lambda))
+b_t <- test_set %>%
+    left_join(b_l, by="ADMIN1") %>%
+    left_join(b_p, by="ACTOR1") %>%
+    group_by(ACTOR2) %>%
+    summarize(b_t = sum(DEATHS - b_l - b_p - mu)/(n()+lambda))
+b_d <- test_set %>%
+    left_join(b_l, by="ADMIN1") %>%
+    left_join(b_p, by="ACTOR1") %>%
+    left_join(b_t, by="ACTOR2") %>%
+    group_by(WEEK) %>%
+    summarize(b_d = sum(DEATHS - b_l - b_p - b_t - mu)/(n()+lambda))
+predicted_fatalities <-
+    test_set %>%
+    left_join(b_l, by = "ADMIN1") %>%
+    left_join(b_p, by = "ACTOR1") %>%
+    left_join(b_t, by = "ACTOR2") %>%
+    left_join(b_d, by = "WEEK") %>%
+    mutate(pred = mu + b_l + b_p + b_t + b_d) %>%
+    pull(pred)
+
+model_5_rmse <- RMSE(predicted_fatalities, test_set$DEATHS)
+
+rmse_results <- bind_rows(rmse_results,
+                           tibble(method="Test of Regularized Location + Perpetrator + Target + Date Effect Model",
+                                      RMSE = model_5_rmse))
+rmse_results %>% knitr::kable()
+```
+
+#Discussion of results
+
+The results show that we can use location, perpetrator, target and date averages to predict the scale of fatalities in deadly political violence in Sub-Saharan Africa and the Maghreb with much more confidence (0.20 RMSEs better) than by simply basing our guess on the mean death rate. The testing of the model with an independent sample actually led to better results than with the training sample. 
+
+Conflict early warning systems usually attempt to predict the occurrence of armed conflict on a yearly and national level. In these cases, conflict is simply assumed to "start" with 25 battle-related deaths per year. The present project took a different approach and dis-aggregated conflict into its deadly encounters per week in a specific location. Hence, predictions are much more timely and relevant to the local context, as they also consider violence much below the normal 25 deaths threshold.
+
+There is, however, a caveat to the robustness of the findings due to the way how the samples were constructed. The original aim of the project was to predict all types of violent events, including those that do not result in any deaths. However, the ACLED data does not include a variable coding for violence per se. It therefore has to be kept in mind that the selection of only deadly events introduces significant bias to the sample.
+
+#Conclusion
+
+This small project has demonstrated the potential usefulness of using machine learning techniques on dis-aggregated armed conflict data to predict the magnitude of the deadly consequences of conflict events. The final model includes variables on the location, perpetrator, target and date of a violent event.
+
+The next step of this project would be to construct a forecasting system for deadly political violence by adding further predictors, including various political, social and economic variables.
